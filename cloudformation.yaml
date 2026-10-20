@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Infrastructure for Library Book Lending System with EC2, RDS MySQL, and SNS
+
+Parameters:
+  OperatorEmail:
+    Type: String
+    Description: Email address for overdue notification subscriptions
+    Default: admin@example.com
+  DBMasterUsername:
+    Type: String
+    Description: Master username for RDS MySQL database
+    Default: libraryadmin
+    MinLength: 4
+    MaxLength: 16
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+  DBMasterPassword:
+    Type: String
+    Description: Master password for RDS MySQL database
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+  InstanceType:
+    Type: String
+    Description: EC2 instance type
+    Default: t3.micro
+  KeyName:
+    Type: String
+    Description: Optional EC2 KeyPair name for SSH access
+    Default: ''
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, '']]
+
+Resources:
+  LibrarySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: library-overdue-alerts
+      DisplayName: Library Overdue Alert System
+
+  LibraryEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref OperatorEmail
+      TopicArn: !Ref LibrarySNSTopic
+
+  LibraryEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LibraryEC2PublishRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LibrarySNSPublishPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref LibrarySNSTopic
+
+  LibraryInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref LibraryEC2Role
+
+  LibraryEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP and SSH access to Library EC2 instance
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  LibraryRDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable MySQL access from Library EC2 instance
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !GetAtt LibraryEC2SecurityGroup.GroupId
+
+  LibraryDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: librarydb
+      DBInstanceIdentifier: library-mysql-db
+      AllocatedStorage: '20'
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: '8.0'
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterPassword
+      VPCSecurityGroups:
+        - !GetAtt LibraryRDSSecurityGroup.GroupId
+      PubliclyAccessible: false
+      MultiAZ: false
+      StorageType: gp2
+      DeletionPolicy: Delete
+
+  LibraryEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref LibraryInstanceProfile
+      SecurityGroupIds:
+        - !GetAtt LibraryEC2SecurityGroup.GroupId
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+      ImageId: ami-0c101f26f147fa7fd
+      Tags:
+        - Key: Name
+          Value: Library-App-Server
+
+Outputs:
+  RDSEndpoint:
+    Description: RDS MySQL Connection Endpoint Address
+    Value: !GetAtt LibraryDatabase.Endpoint.Address
+  RDSPort:
+    Description: RDS MySQL Connection Port
+    Value: !GetAtt LibraryDatabase.Endpoint.Port
+  SNSTopicARN:
+    Description: ARN for Overdue Book Notifications SNS Topic
+    Value: !Ref LibrarySNSTopic
+  EC2PublicIP:
+    Description: Public IP of the deployed Library EC2 instance
+    Value: !GetAtt LibraryEC2Instance.PublicIp
+  EC2PublicDNS:
+    Description: Public DNS of the deployed Library EC2 instance
+    Value: !GetAtt LibraryEC2Instance.PublicDnsName
